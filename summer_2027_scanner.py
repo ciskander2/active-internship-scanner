@@ -23,18 +23,39 @@ PROVIDERS = [
 
 OFFICIAL_SOURCE_DOMAINS = {
     "Amazon": ["amazon.jobs"],
+    "Adobe": ["adobe.wd5.myworkdayjobs.com"],
     "DE Shaw": ["deshaw.com"],
+    "Intuit": ["jobs.intuit.com"],
+    "Netflix": ["explore.jobs.netflix.net", "jobs.netflix.com"],
+    "NVIDIA": ["nvidia.wd5.myworkdayjobs.com"],
     "Optiver": ["optiver.com"],
+    "Rivian": ["careers.rivian.com"],
+    "Salesforce": ["salesforce.wd12.myworkdayjobs.com"],
     "Susquehanna Associates": ["careers.sig.com", "sig.com"],
     "Tesla": ["tesla.com"],
 }
 
 OFFICIAL_CAREER_PAGES = {
     "DE Shaw": ["https://www.deshaw.com/careers?keywords=intern"],
+    "Intuit": ["https://jobs.intuit.com/search-jobs/intern/27595/1"],
+    "Netflix": ["https://explore.jobs.netflix.net/careers?query=intern"],
     "Optiver": [
         "https://www.optiver.com/working-at-optiver/career-opportunities/?level=internship&numberposts=100"
     ],
     "Tesla": ["https://www.tesla.com/careers/search/?query=internship"],
+}
+
+WORKDAY_SOURCES = {
+    "Adobe": [
+        ("https://adobe.wd5.myworkdayjobs.com", "adobe", "external_experienced"),
+        ("https://adobe.wd5.myworkdayjobs.com", "adobe", "external_university"),
+    ],
+    "NVIDIA": [
+        ("https://nvidia.wd5.myworkdayjobs.com", "nvidia", "NVIDIAExternalCareerSite"),
+    ],
+    "Salesforce": [
+        ("https://salesforce.wd12.myworkdayjobs.com", "salesforce", "External_Career_Site"),
+    ],
 }
 
 SLUGS = {
@@ -289,12 +310,57 @@ def fetch_amazon_jobs():
     return dedupe_jobs(jobs)
 
 
-def fetch_sig_jobs():
+def fetch_workday_jobs(company):
+    jobs = []
+    for base_url, tenant, site in WORKDAY_SOURCES.get(company, []):
+        endpoint = f"{base_url}/wday/cxs/{tenant}/{site}/jobs"
+        for offset in range(0, 100, 20):
+            payload = json.dumps(
+                {"appliedFacets": {}, "limit": 20, "offset": offset, "searchText": "intern"}
+            ).encode("utf-8")
+            try:
+                req = urllib.request.Request(
+                    endpoint,
+                    data=payload,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=20) as response:
+                    data = json.loads(response.read().decode("utf-8", "ignore"))
+            except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError):
+                break
+
+            postings = data.get("jobPostings", [])
+            for job in postings:
+                title = job.get("title", "")
+                if not is_active_internship({"title": title}):
+                    continue
+                jobs.append(
+                    {
+                        "title": title,
+                        "url": absolute_url(f"/{site}{job.get('externalPath', '')}", base_url),
+                        "location": job.get("locationsText", ""),
+                        "body": text_of(job),
+                        "source": "official_source",
+                    }
+                )
+            if len(postings) < 20:
+                break
+    return dedupe_jobs(jobs)
+
+
+def fetch_jibe_jobs(company, base_url):
     jobs = []
     urls = [
-        "https://careers.sig.com/api/jobs?keywords=internship&sortBy=relevance&page=1&limit=100",
-        "https://careers.sig.com/api/jobs?categories=Interns%20%2B%20Co-ops&page=1&limit=100",
+        f"{base_url}/api/jobs?keywords=intern&sortBy=relevance&page=1&limit=100",
+        f"{base_url}/api/jobs?keywords=internship&sortBy=relevance&page=1&limit=100",
     ]
+    if "sig.com" in base_url:
+        urls.append(f"{base_url}/api/jobs?categories=Interns%20%2B%20Co-ops&page=1&limit=100")
     for url in urls:
         try:
             data = fetch_json(url)
@@ -310,7 +376,7 @@ def fetch_sig_jobs():
             jobs.append(
                 {
                     "title": title,
-                    "url": f"https://careers.sig.com/jobs/{slug}?lang={language}",
+                    "url": f"{base_url}/jobs/{slug}?lang={language}",
                     "location": job.get("city", ""),
                     "body": text_of(job),
                     "source": "official_source",
@@ -319,16 +385,78 @@ def fetch_sig_jobs():
     return dedupe_jobs(jobs)
 
 
+def parse_talentbrew_jobs(text, base_url):
+    jobs = []
+    pattern = (
+        r'<a[^>]+href=["\']([^"\']+)["\'][^>]*'
+        r'data-job-id=["\'][^"\']+["\'][^>]*'
+        r'data-title=["\']([^"\']+)["\'][^>]*>'
+    )
+    for href, title in re.findall(pattern, text, re.S | re.I):
+        title = clean_html(title)
+        if not is_active_internship({"title": title}):
+            continue
+        jobs.append(
+            {
+                "title": title,
+                "url": absolute_url(href, base_url),
+                "location": "",
+                "body": title,
+                "source": "official_source",
+            }
+        )
+    return dedupe_jobs(jobs)
+
+
+def parse_eightfold_jobs(text):
+    jobs = []
+    text = html.unescape(text)
+    match = re.search(r'"positions"\s*:\s*(\[.*?\])\s*,\s*"debug"', text, re.S)
+    if not match:
+        return jobs
+    try:
+        positions = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return jobs
+
+    for job in positions:
+        title = job.get("name") or job.get("posting_name") or ""
+        if not is_active_internship({"title": title}):
+            continue
+        jobs.append(
+            {
+                "title": title,
+                "url": job.get("canonicalPositionUrl", ""),
+                "location": job.get("location", ""),
+                "body": text_of(job),
+                "source": "official_source",
+            }
+        )
+    return dedupe_jobs(jobs)
+
+
 def fetch_official_source_jobs(company):
+    workday_jobs = fetch_workday_jobs(company)
+    if workday_jobs:
+        return workday_jobs
     if company == "Amazon":
         return fetch_amazon_jobs()
     if company == "Susquehanna Associates":
-        return fetch_sig_jobs()
+        return fetch_jibe_jobs(company, "https://careers.sig.com")
+    if company == "Rivian":
+        return fetch_jibe_jobs(company, "https://careers.rivian.com")
 
     jobs = []
     for url in OFFICIAL_CAREER_PAGES.get(company, []):
         try:
-            jobs.extend(parse_official_html_jobs(fetch_text(url), url))
+            text = fetch_text(url)
+            if company == "Intuit":
+                jobs.extend(parse_talentbrew_jobs(text, url))
+            elif company == "Netflix":
+                jobs.extend(parse_official_html_jobs(text, url))
+                jobs.extend(parse_eightfold_jobs(text))
+            else:
+                jobs.extend(parse_official_html_jobs(text, url))
         except (HTTPError, URLError, TimeoutError, OSError):
             continue
     return dedupe_jobs(jobs)
