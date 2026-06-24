@@ -29,6 +29,8 @@ The primary scanner checks official job-board APIs for:
 - Lever
 - Ashby
 
+When those feeds are unavailable or incomplete, the scanner also tries known first-party career sources, such as Amazon's jobs JSON endpoint, SIG's Jibe/iCIMS jobs API, and official career pages from DE Shaw and Optiver. These sources are parsed automatically; individual postings are not hardcoded.
+
 It marks a company as `Yes` when a live posting title matches an internship pattern, such as:
 
 - `Intern`
@@ -59,4 +61,4 @@ Edit `C:\Users\chris\Downloads\JOB APPLICATION TEMPLATE.xlsx`. The scanner reads
 
 ## Known Limits
 
-Some companies use Workday, custom careers sites, or blocked search pages that do not expose a simple public API. The scanner flags those as unverified unless an official posting URL is added to the manual official postings list in `summer_2027_scanner.py`.
+Some companies use Workday, custom careers sites, or blocked pages that do not expose a simple public API. Tesla, for example, currently returns HTTP 403 to non-browser scripted requests, so it may need a browser-assisted check unless Tesla exposes a public API. The raw `.json` output shows which source produced each match.

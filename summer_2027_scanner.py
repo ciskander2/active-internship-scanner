@@ -1,5 +1,4 @@
 import argparse
-import base64
 import datetime as dt
 import html
 import json
@@ -21,6 +20,22 @@ PROVIDERS = [
     ("lever", "https://api.lever.co/v0/postings/{slug}?mode=json"),
     ("ashby", "https://api.ashbyhq.com/posting-api/job-board/{slug}"),
 ]
+
+OFFICIAL_SOURCE_DOMAINS = {
+    "Amazon": ["amazon.jobs"],
+    "DE Shaw": ["deshaw.com"],
+    "Optiver": ["optiver.com"],
+    "Susquehanna Associates": ["careers.sig.com", "sig.com"],
+    "Tesla": ["tesla.com"],
+}
+
+OFFICIAL_CAREER_PAGES = {
+    "DE Shaw": ["https://www.deshaw.com/careers?keywords=intern"],
+    "Optiver": [
+        "https://www.optiver.com/working-at-optiver/career-opportunities/?level=internship&numberposts=100"
+    ],
+    "Tesla": ["https://www.tesla.com/careers/search/?query=internship"],
+}
 
 SLUGS = {
     "Microsoft": ["microsoft"],
@@ -99,87 +114,6 @@ SLUGS = {
     "Jane Street": ["janestreet", "jane-street"],
 }
 
-# Search-confirmed official postings that do not expose a simple ATS API.
-# Keep this list small and audit-friendly; the live ATS scan remains the primary source.
-MANUAL_OFFICIAL_POSTINGS = {
-    "Tesla": [
-        {
-            "title": "Internship, Data Engineer, Fleet Analytics (Fall 2026)",
-            "location": "",
-            "url": "https://www.tesla.com/careers/search/job/internship-data-engineer-fleet-analytics-fall-2026-271696",
-        },
-        {
-            "title": "Internship, Data Engineer, Fleet Data, Self Driving (Fall 2026)",
-            "location": "",
-            "url": "https://www.tesla.com/careers/search/job/269828",
-        },
-        {
-            "title": "Internship, Software Engineer, AI Data Infrastructure (Fall 2026)",
-            "location": "",
-            "url": "https://www.tesla.com/careers/search/job/internship-software-engineer-ai-data-infrastructure-fall-2026-269829",
-        },
-        {
-            "title": "AI Engineering Intern, Summer 2026",
-            "location": "",
-            "url": "https://www.tesla.com/careers/search/job/ai-engineering-intern-summer-2026-259784",
-        },
-        {
-            "title": "Internship, Software Engineer, Service Engineering (Summer 2026)",
-            "location": "",
-            "url": "https://www.tesla.com/careers/search/job/internship-software-engineer-service-engineering-summer-2026-259221",
-        },
-    ],
-    "Amazon": [
-        {
-            "title": "2027 Amazon Operations Finance Rotational Program Summer Internship",
-            "location": "Seattle, WA / Arlington, VA",
-            "url": "https://www.amazon.jobs/en/jobs/10435673/2027-amazon-operations-finance-rotational-program-summer-internship",
-        }
-    ],
-    "Optiver": [
-        {
-            "title": "Expressions of Interest - Quantitative Research Internship, PhD (Summer 2027 - Shanghai)",
-            "location": "Shanghai",
-            "url": "https://www.optiver.com/working-at-optiver/career-opportunities/page/2/?level=internship&numberposts=10",
-        }
-    ],
-    "Susquehanna Associates": [
-        {
-            "title": "Quantitative Trader Internship: Summer 2027",
-            "location": "",
-            "url": "https://careers.sig.com/quantitative-systematic-trading-quantitative-research/jobs/10717?lang=en-us",
-        },
-        {
-            "title": "Equity Analyst Internship: Summer 2027",
-            "location": "New York",
-            "url": "https://careers.sig.com/new-york/jobs/10573?lang=en-us",
-        },
-        {
-            "title": "Operations Internship: Summer 2027",
-            "location": "Bala Cynwyd, PA",
-            "url": "https://careers.sig.com/jobs/10916?lang=en-us",
-        },
-        {
-            "title": "ETF Sales Internship: Summer 2027",
-            "location": "Bala Cynwyd, PA",
-            "url": "https://careers.sig.com/jobs/10944?lang=en-us",
-        },
-    ],
-    "DE Shaw": [
-        {
-            "title": "Software Developer Intern (New York) - Summer 2027",
-            "location": "New York",
-            "url": "https://www.deshaw.com/careers/software-developer-intern-new-york-summer-2027-5894",
-        },
-        {
-            "title": "Trader/Analyst Intern (London) - Summer 2027",
-            "location": "London",
-            "url": "https://www.deshaw.com/careers/trader-analyst-intern-london-summer-2027-5862",
-        },
-    ],
-}
-
-
 def normalize_company(company):
     return re.sub(r"[^a-z0-9]", "", company.lower().replace("&", "and"))
 
@@ -211,6 +145,193 @@ def fetch_json(url, timeout=15):
     )
     with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8", "ignore"))
+
+
+def fetch_text(url, timeout=15):
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0", "Accept": "text/html,application/xhtml+xml"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return response.read().decode("utf-8", "ignore")
+
+
+def clean_html(value):
+    value = re.sub(r"<.*?>", " ", value or "", flags=re.S)
+    return re.sub(r"\s+", " ", html.unescape(value)).strip()
+
+
+def official_domains(company):
+    domains = list(OFFICIAL_SOURCE_DOMAINS.get(company, []))
+    for slug in variants(company):
+        if "." in slug:
+            domains.append(slug)
+    return list(dict.fromkeys(domains))
+
+
+def absolute_url(url, base_url):
+    return urllib.parse.urljoin(base_url, html.unescape(url))
+
+
+def collect_json_jobs(value, base_url):
+    jobs = []
+    if isinstance(value, dict):
+        title = value.get("title") or value.get("name")
+        url = value.get("url") or value.get("href")
+        if title and url and is_active_internship({"title": title}):
+            jobs.append(
+                {
+                    "title": clean_html(str(title)),
+                    "url": absolute_url(str(url), base_url),
+                    "location": clean_html(text_of(value.get("location") or "")),
+                    "body": clean_html(text_of(value)),
+                    "source": "official_source",
+                }
+            )
+        for nested in value.values():
+            jobs.extend(collect_json_jobs(nested, base_url))
+    elif isinstance(value, list):
+        for nested in value:
+            jobs.extend(collect_json_jobs(nested, base_url))
+    return jobs
+
+
+def parse_official_html_jobs(text, base_url):
+    jobs = []
+    for script in re.findall(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        text,
+        re.S | re.I,
+    ):
+        try:
+            jobs.extend(collect_json_jobs(json.loads(html.unescape(script)), base_url))
+        except json.JSONDecodeError:
+            continue
+
+    for href, label in re.findall(
+        r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>'
+        r'(?:(?!</a>).)*?<span[^>]+class=["\'][^"\']*job-display-name[^"\']*["\'][^>]*>(.*?)</span>',
+        text,
+        re.S | re.I,
+    ):
+        title = clean_html(label)
+        url = absolute_url(href, base_url)
+        if not url.startswith(("http://", "https://")):
+            continue
+        if not is_active_internship({"title": title}):
+            continue
+        jobs.append(
+            {
+                "title": title,
+                "url": url,
+                "location": "",
+                "body": title,
+                "source": "official_source",
+            }
+        )
+
+    for href, label in re.findall(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', text, re.S | re.I):
+        title = clean_html(label)
+        url = absolute_url(href, base_url)
+        if not url.startswith(("http://", "https://")):
+            continue
+        if not is_active_internship({"title": title}):
+            continue
+        jobs.append(
+            {
+                "title": title,
+                "url": url,
+                "location": "",
+                "body": title,
+                "source": "official_source",
+            }
+        )
+    return dedupe_jobs(jobs)
+
+
+def dedupe_jobs(jobs):
+    deduped = []
+    for job in jobs:
+        key = job.get("url") or job.get("title")
+        if not key:
+            continue
+        if not any((existing.get("url") or existing.get("title")) == key for existing in deduped):
+            deduped.append(job)
+    return deduped
+
+
+def fetch_amazon_jobs():
+    jobs = []
+    for offset in range(0, 300, 100):
+        url = (
+            "https://www.amazon.jobs/en/search.json?"
+            f"base_query=internship&offset={offset}&result_limit=100"
+        )
+        try:
+            data = fetch_json(url)
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError):
+            break
+        for job in data.get("jobs", []):
+            title = job.get("title", "")
+            if not is_active_internship({"title": title}):
+                continue
+            jobs.append(
+                {
+                    "title": title,
+                    "url": absolute_url(job.get("job_path", ""), "https://www.amazon.jobs"),
+                    "location": job.get("location", ""),
+                    "body": text_of(job),
+                    "source": "official_source",
+                }
+            )
+        if len(data.get("jobs", [])) < 100:
+            break
+    return dedupe_jobs(jobs)
+
+
+def fetch_sig_jobs():
+    jobs = []
+    urls = [
+        "https://careers.sig.com/api/jobs?keywords=internship&sortBy=relevance&page=1&limit=100",
+        "https://careers.sig.com/api/jobs?categories=Interns%20%2B%20Co-ops&page=1&limit=100",
+    ]
+    for url in urls:
+        try:
+            data = fetch_json(url)
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError):
+            continue
+        for item in data.get("jobs", []):
+            job = item.get("data", item)
+            title = job.get("title", "")
+            if not is_active_internship({"title": title}):
+                continue
+            slug = job.get("slug") or job.get("req_id") or ""
+            language = job.get("language") or "en-us"
+            jobs.append(
+                {
+                    "title": title,
+                    "url": f"https://careers.sig.com/jobs/{slug}?lang={language}",
+                    "location": job.get("city", ""),
+                    "body": text_of(job),
+                    "source": "official_source",
+                }
+            )
+    return dedupe_jobs(jobs)
+
+
+def fetch_official_source_jobs(company):
+    if company == "Amazon":
+        return fetch_amazon_jobs()
+    if company == "Susquehanna Associates":
+        return fetch_sig_jobs()
+
+    jobs = []
+    for url in OFFICIAL_CAREER_PAGES.get(company, []):
+        try:
+            jobs.extend(parse_official_html_jobs(fetch_text(url), url))
+        except (HTTPError, URLError, TimeoutError, OSError):
+            continue
+    return dedupe_jobs(jobs)
 
 
 def text_of(value):
@@ -272,6 +393,7 @@ def scan_company(company, delay_seconds=0.1):
     checked = []
     board = None
     all_jobs = []
+    official_source_domains = official_domains(company)
     for slug in variants(company):
         for provider, template in PROVIDERS:
             url = template.format(slug=slug)
@@ -293,16 +415,18 @@ def scan_company(company, delay_seconds=0.1):
         if is_active_internship(job):
             if not any(existing.get("url") == job.get("url") for existing in matches):
                 matches.append(job)
-    for job in MANUAL_OFFICIAL_POSTINGS.get(company, []):
-        if is_active_internship(job):
-            if not any(existing.get("url") == job.get("url") for existing in matches):
-                matches.append(job)
+    official_source_matches = fetch_official_source_jobs(company)
+    for job in official_source_matches:
+        if not any(existing.get("url") == job.get("url") for existing in matches):
+            matches.append(job)
     return {
         "company": company,
         "board": board,
         "job_count": len(all_jobs),
         "matches": matches,
         "checked": checked,
+        "official_source_domains": official_source_domains,
+        "official_source_match_count": len(official_source_matches),
     }
 
 
@@ -358,7 +482,15 @@ def write_workbook(input_path, output_path, sheet_name, results, scan_date):
                 dict.fromkeys(job.get("location", "") for job in matches[:10] if job.get("location"))
             )
             urls = "; ".join(job.get("url", "") for job in matches[:10] if job.get("url"))
-            note = f"Confirmed active official internship posting(s) found. {len(matches)} match(es)."
+            sources = []
+            if any(job.get("source") == "official_source" for job in matches):
+                sources.append("official career source")
+            if any(job.get("source") != "official_source" for job in matches):
+                sources.append("live ATS feed")
+            note = (
+                f"Confirmed active official internship posting(s) found. "
+                f"{len(matches)} match(es) via {', '.join(sources)}."
+            )
         else:
             status = "No confirmed active posting found"
             fill = "FFF2CC"
@@ -371,6 +503,12 @@ def write_workbook(input_path, output_path, sheet_name, results, scan_date):
                 note = (
                     f"Live {board.get('provider')} board scanned "
                     f"({result.get('job_count', 0)} jobs); no job title matched internship/co-op/summer analyst."
+                )
+            elif result.get("official_source_domains"):
+                urls = "; ".join(result.get("official_source_domains", []))
+                note = (
+                    "Official career source attempted; "
+                    "no confirmed internship posting found."
                 )
             else:
                 note = (
