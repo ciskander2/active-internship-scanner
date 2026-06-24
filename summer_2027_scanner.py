@@ -264,7 +264,7 @@ def extract_jobs(provider, data):
 
 def is_active_internship(job):
     title = (job.get("title") or "").lower()
-    internship = r"\binterns?\b|\binternship\b|\bco-?op\b|\bsummer analyst\b|\bsummer associate\b"
+    internship = r"\binterns?\b|\binternships?\b|\bco-?op\b|\bsummer analyst\b|\bsummer associate\b"
     return bool(re.search(internship, title))
 
 
